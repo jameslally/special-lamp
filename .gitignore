@@ -209,3 +209,6 @@ __marimo__/
 
 #JL
 input_files/
+
+# Debug output files
+debug/
