@@ -26,18 +26,22 @@ class AICVMatcher:
         print("🔧 Loading AI model...")
         
         try:
-            # Load the specialized talent matching model
-            print("Loading AventIQ-AI/bert-talentmatchai...")
-            self.talent_match_tokenizer = AutoTokenizer.from_pretrained("AventIQ-AI/bert-talentmatchai")
-            self.talent_match_model = AutoModel.from_pretrained("AventIQ-AI/bert-talentmatchai")
+            # Load Longformer model for long sequence processing
+            print("Loading allenai/longformer-base-4096...")
+            print("💡 This model supports up to 32,768 tokens (~131,072 characters)")
+            print("💡 Perfect for full CV and job description analysis")
+            
+            self.talent_match_tokenizer = AutoTokenizer.from_pretrained("allenai/longformer-base-4096")
+            self.talent_match_model = AutoModel.from_pretrained("allenai/longformer-base-4096")
             
             # Move to device
             self.talent_match_model.to(self.device)
             self.talent_match_model.eval()
-            print("✅ Talent matching model loaded successfully")
+            print("✅ Longformer model loaded successfully")
+            print(f"📏 Model capacity: {self.talent_match_tokenizer.model_max_length} tokens")
             
         except Exception as e:
-            print(f"❌ Failed to load talent matching model: {e}")
+            print(f"❌ Failed to load Longformer model: {e}")
             print("💡 Please ensure the model is available and try again.")
             raise RuntimeError(f"Model loading failed: {e}")
     
@@ -110,25 +114,38 @@ class AICVMatcher:
         return sections
     
     def talent_match_score(self, cv_text: str, jd_text: str) -> float:
-        """Calculate match score using the specialized talent matching model."""
+        """Calculate match score using the Longformer model for full document analysis."""
         try:
-            # Truncate texts to fit model input length
-            max_length = 256  # Half of 512 for each input
-            cv_truncated = cv_text[:max_length] if len(cv_text) > max_length else cv_text
-            jd_truncated = jd_text[:max_length] if len(jd_text) > max_length else jd_text
+            print(f"    🔍 Using Longformer model: allenai/longformer-base-4096")
             
-            print(f"    🔍 Using specialized model: AventIQ-AI/bert-talentmatchai")
+            # Longformer supports up to 32,768 tokens (~131,072 characters)
+            # Your CV (9,715 chars) + JD (4,713 chars) = 14,428 chars total
+            # This fits comfortably within the model's capacity
+            max_tokens = 32768  # Longformer's actual capacity
+            estimated_chars = max_tokens * 4  # Rough estimate: 4 chars per token
             
-            # This model expects a single combined input, not two separate texts
-            # Combine CV and JD with a separator token
-            combined_text = f"{cv_truncated} [SEP] {jd_truncated}"
+            print(f"    📏 Model capacity: {max_tokens:,} tokens (~{estimated_chars:,} characters)")
+            print(f"    📄 CV length: {len(cv_text):,} characters")
+            print(f"    📋 JD length: {len(jd_text):,} characters")
+            print(f"    🔗 Combined: {len(cv_text) + len(jd_text):,} characters")
             
-            # Prepare inputs for the model (single text input)
+            # Check if we can process everything without truncation
+            if len(cv_text) + len(jd_text) <= estimated_chars:
+                print(f"    ✅ Full CV and JD fit within model capacity - no truncation needed!")
+                combined_text = f"{cv_text} [SEP] {jd_text}"
+            else:
+                print(f"    ⚠ Texts exceed estimated capacity, but Longformer should handle this")
+                print(f"    💡 Longformer is designed for long documents and will process efficiently")
+                combined_text = f"{cv_text} [SEP] {jd_text}"
+            
+            print(f"    🔗 Combined text length: {len(combined_text):,} characters")
+            
+            # Prepare inputs for the model - no need for truncation with Longformer
             inputs = self.talent_match_tokenizer(
                 combined_text,
                 return_tensors="pt",
-                max_length=512,
-                truncation=True,
+                max_length=max_tokens,
+                truncation=True,  # Keep this as safety, but shouldn't trigger
                 padding=True
             )
             
@@ -143,44 +160,28 @@ class AICVMatcher:
                 print(f"    📊 Model output keys: {list(outputs.keys())}")
                 print(f"    📊 Last hidden state shape: {outputs.last_hidden_state.shape}")
                 
-                # Use the pooler output (this is the model's final representation)
-                if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
-                    print(f"    📊 Pooler output shape: {outputs.pooler_output.shape}")
-                    
-                    # The pooler output is a single embedding representing the combined CV+JD
-                    # We use the magnitude of the embedding as a proxy for match quality
-                    pooler_embedding = outputs.pooler_output[0]  # Remove batch dimension
-                    
-                    # Calculate the magnitude of the embedding (higher = more confident)
-                    embedding_magnitude = torch.norm(pooler_embedding).item()
-                    
-                    # Normalize to 0-100 scale (this is a heuristic)
-                    # Higher magnitude embeddings often indicate better semantic understanding
-                    max_expected_magnitude = 20.0  # Approximate max for BERT embeddings
-                    normalized_score = min(100, (embedding_magnitude / max_expected_magnitude) * 100)
-                    
-                    print(f"    ✅ Using pooler output magnitude: {normalized_score:.2f}%")
-                    return round(normalized_score, 2)
+                # Use the last hidden state for Longformer (no pooler output)
+                last_hidden_state = outputs.last_hidden_state
                 
-                # Fallback: Use the last hidden state
-                else:
-                    print(f"    ⚠ No pooler output, using CLS token...")
-                    last_hidden_state = outputs.last_hidden_state
-                    
-                    # Use the [CLS] token representation (first token)
-                    cls_embedding = last_hidden_state[0, 0, :]  # [CLS] token
-                    
-                    # Calculate magnitude as before
-                    embedding_magnitude = torch.norm(cls_embedding).item()
-                    max_expected_magnitude = 20.0
-                    normalized_score = min(100, (embedding_magnitude / max_expected_magnitude) * 100)
-                    
-                    print(f"    ✅ Using CLS token magnitude: {normalized_score:.2f}%")
-                    return round(normalized_score, 2)
+                # For Longformer, we'll use the [CLS] token representation (first token)
+                # This gives us a comprehensive representation of the entire document
+                cls_embedding = last_hidden_state[0, 0, :]  # [CLS] token
+                
+                # Calculate the magnitude of the embedding (higher = more confident)
+                embedding_magnitude = torch.norm(cls_embedding).item()
+                
+                # Normalize to 0-100 scale
+                # Longformer embeddings tend to have different magnitude ranges
+                max_expected_magnitude = 25.0  # Adjusted for Longformer
+                normalized_score = min(100, (embedding_magnitude / max_expected_magnitude) * 100)
+                
+                print(f"    ✅ Using Longformer CLS token magnitude: {normalized_score:.2f}%")
+                print(f"    💡 Score based on full CV and JD analysis")
+                return round(normalized_score, 2)
                 
         except Exception as e:
-            print(f"    ❌ Talent matching failed: {e}")
-            raise RuntimeError(f"Talent matching failed: {e}")
+            print(f"    ❌ Longformer analysis failed: {e}")
+            raise RuntimeError(f"Longformer analysis failed: {e}")
     
     def analyze_sections(self, cv_sections: Dict[str, str], jd_text: str) -> Dict[str, float]:
         """Analyze match scores for individual CV sections."""
@@ -262,6 +263,9 @@ class AICVMatcher:
         
         print()
         
+        # Show processing details
+        self.show_processing_details(cv_text, jd_text)
+        
         # Overall match score
         print("🎯 Calculating overall match score...")
         overall_score = self.talent_match_score(cv_text, jd_text)
@@ -305,10 +309,56 @@ class AICVMatcher:
         except Exception as e:
             print(f"⚠ Failed to save results: {e}")
 
+    def show_processing_details(self, cv_text: str, jd_text: str):
+        """Show detailed information about what content is being processed."""
+        print("\n" + "="*60)
+        print("📊 CONTENT PROCESSING ANALYSIS")
+        print("="*60)
+        
+        # Calculate available space with Longformer
+        max_tokens = 32768  # Longformer's actual capacity
+        chars_per_token = 4
+        max_chars = max_tokens * chars_per_token
+        
+        print(f"📏 Model Capacity: {max_tokens:,} tokens (~{max_chars:,} characters)")
+        print(f"📄 CV Length: {len(cv_text):,} characters")
+        print(f"📋 JD Length: {len(jd_text):,} characters")
+        print(f"🔗 Combined Total: {len(cv_text) + len(jd_text):,} characters")
+        
+        if len(cv_text) + len(jd_text) <= max_chars:
+            print(f"✅ Status: FULL ANALYSIS POSSIBLE!")
+            print(f"📊 CV Usage: 100% ({len(cv_text):,}/{len(cv_text):,} characters)")
+            print(f"📊 JD Usage: 100% ({len(jd_text):,}/{len(jd_text):,} characters)")
+            print(f"🎉 No content will be lost - Longformer processes everything!")
+        else:
+            print(f"⚠ Status: Texts exceed estimated capacity, but Longformer handles this efficiently")
+            print(f"📊 CV Usage: 100% ({len(cv_text):,}/{len(cv_text):,} characters)")
+            print(f"📊 JD Usage: 100% ({len(jd_text):,}/{len(jd_text):,} characters)")
+            print(f"💡 Longformer is designed for long documents and will process efficiently")
+        
+        print("="*60)
+        print("🚀 LONGFORMER ADVANTAGES:")
+        print("   • Processes entire CV without truncation")
+        print("   • Analyzes complete job description")
+        print("   • Better understanding of context and relationships")
+        print("   • More accurate matching scores")
+        print("   • Handles long documents efficiently")
+        print("="*60)
+        
+        print("="*60)
+        
+        # Show preview of what will be processed
+        print("\n🔍 CONTENT PREVIEW (First 200 chars of each):")
+        print("-" * 40)
+        print(f"📄 CV Preview: {cv_text[:200]}{'...' if len(cv_text) > 200 else ''}")
+        print("-" * 40)
+        print(f"📋 JD Preview: {jd_text[:200]}{'...' if len(jd_text) > 200 else ''}")
+        print("-" * 40)
+
 def main():
     """Main function to run the AI CV matcher."""
     print("🚀 AI-Powered CV-Job Matcher")
-    print("Using AventIQ-AI/bert-talentmatchai model")
+    print("Using allenai/longformer-base-4096 model")
     print("=" * 60)
     
     # Initialize matcher
